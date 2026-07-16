@@ -4,9 +4,9 @@ import requests
 import pandas as pd
 
 # ================= CONFIGURATIONS =================
-BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"          # <-- Yahan apna Telegram Bot Token dalein
-ADMIN_ID = 8184803370                           # <-- Yahan apni numeric Telegram ID dalein (e.g. 987654321)
-FIREBASE_PROJECT_ID = "ss22-a96d3"             # <-- Aapka Firebase Project ID
+BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"
+ADMIN_ID = 8184803370
+FIREBASE_PROJECT_ID = "ss22-a96d3"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=50)
 
@@ -14,7 +14,6 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=50)
 user_states = {}
 
 # ================= FIREBASE REST API HELPERS =================
-# Bina kisi service-account JSON file ke direct database handle karne ke liye REST API
 BASE_DB_URL = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
 
 def get_user_data(user_id):
@@ -81,7 +80,6 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
     """Admin Panel me list dikhane aur backup download karne ke liye data save karna"""
     url = f"{BASE_DB_URL}/search_history"
     
-    # Python dictionary (Excel Rows) ko Firestore format (REST API) me map karna
     formatted_rows = []
     for row in excel_data_list:
         map_value = {}
@@ -103,7 +101,6 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
             }
         }
     }
-    # Firebase Firestore me data add karein
     requests.post(url, json=payload)
 
 # ================= TELEGRAM ADMIN COMMANDS =================
@@ -285,9 +282,8 @@ def process_autofill_and_search(message):
     state = user_states.get(user_id)
     base_ca = state["base_ca"]
     
-    # AUTOFILL: Serial sequence array generate karega line se
     ca_list = [str(base_ca + i) for i in range(qty)]
-    user_states.pop(user_id, None) # state clean karein
+    user_states.pop(user_id, None)
     
     user_data = get_user_data(user_id)
     current_balance = user_data.get("balance", 0.0)
@@ -307,7 +303,6 @@ def process_autofill_and_search(message):
     deducted_total = 0
     
     for idx, ca in enumerate(ca_list):
-        # Database check and deduction (₹10 dynamic per item)
         fresh_data = get_user_data(user_id)
         fresh_bal = fresh_data.get("balance", 0.0) if fresh_data else 0.0
         
@@ -320,7 +315,6 @@ def process_autofill_and_search(message):
         deducted_total += 10
         add_history_log(user_id, 10.0, "Bot Bulk Search", ca)
         
-        # API Call Process
         try:
             api_url = f"https://billguru.kzthubbjdo.workers.dev/?ca_no={ca}"
             response = requests.get(api_url, timeout=10)
@@ -330,12 +324,11 @@ def process_autofill_and_search(message):
             else: d = {}
         except: d = {}
             
-        # Standard Excel Headers (Exact sequence requested by you)
         row = {
-            "Name": d.get("Name", "Not Found"),                  # Column A
-            "Mobile_No": d.get("Mobile_No", "Not Found"),        # Column B
-            "Email": d.get("Email", "Not Found"),                # Column C
-            "Contract_Account": d.get("Contract_Account", ca),   # Column D
+            "Name": d.get("Name", "Not Found"),
+            "Mobile_No": d.get("Mobile_No", "Not Found"),
+            "Email": d.get("Email", "Not Found"),
+            "Contract_Account": d.get("Contract_Account", ca),
             "Partner": d.get("Partner", "null"),
             "Legacy_CRN": d.get("Legacy_CRN", "0"),
             "Plot_No": d.get("Plot_No", ""),
@@ -396,7 +389,6 @@ def process_autofill_and_search(message):
         }
         bulk_results.append(row)
         
-        # Live status message update
         if (idx + 1) % 2 == 0 or (idx + 1) == len(ca_list):
             try:
                 bot.edit_message_text(f"⏳ Processing {idx + 1}/{len(ca_list)} items... Please wait...", message.chat.id, status_msg.message_id)
@@ -406,23 +398,19 @@ def process_autofill_and_search(message):
         bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.")
         return
 
-    # Database backup me upload karein taaki Admin panel se download ho sake
     try:
         user_display_name = user_data.get("name", "Unknown")
         save_search_history_to_firestore(user_id, user_display_name, base_ca, len(bulk_results), bulk_results)
     except Exception as db_err:
         print(f"Firestore save error: {db_err}")
 
-    # Generate Excel Locally
     df = pd.DataFrame(bulk_results)
     file_name = f"Bulk_Bill_{user_id}.xlsx"
     df.to_excel(file_name, index=False)
     
-    # Final remaining balance show karne ke liye check
     final_data = get_user_data(user_id)
     final_bal = final_data.get("balance", 0.0) if final_data else 0.0
     
-    # User ko sheet bhej do
     with open(file_name, "rb") as file:
         bot.send_document(
             message.chat.id, 
@@ -431,7 +419,6 @@ def process_autofill_and_search(message):
             parse_mode="Markdown"
         )
         
-    # Delete temporary local file
     if os.path.exists(file_name):
         os.remove(file_name)
 
