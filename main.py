@@ -2,6 +2,7 @@ import os
 import telebot
 import requests
 import pandas as pd
+import time  # Built-in module ka use
 
 # ================= CONFIGURATIONS =================
 BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"
@@ -65,13 +66,15 @@ def update_balance(user_id, new_balance):
 def add_history_log(user_id, amount, reason, bp):
     """Har user ki dynamic transaction history log karne ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}/history"
+    # FIXED: Kisi external site se time lene ke bajaye direct Python local millisecond timestamp use kiya hai
+    current_ms_time = int(time.time() * 1000)
     payload = {
         "fields": {
             "type": {"stringValue": "deduct"},
             "amount": {"doubleValue": float(amount)},
             "reason": {"stringValue": reason},
             "bp": {"stringValue": bp},
-            "time": {"integerValue": int(requests.get("https://showcase.api.linx.twenty-six-distribution.com/time").json().get("unixtime", 0)*1000)}
+            "time": {"integerValue": current_ms_time}
         }
     }
     requests.post(url, json=payload)
@@ -87,13 +90,15 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
             map_value[k] = {"stringValue": str(v)}
         formatted_rows.append({"mapValue": {"fields": map_value}})
 
+    # FIXED: Direct Python dynamic millisecond timestamp
+    current_ms_time = int(time.time() * 1000)
     payload = {
         "fields": {
             "user_id": {"stringValue": str(user_id)},
             "name": {"stringValue": name},
             "base_ca": {"stringValue": str(base_ca)},
             "quantity": {"integerValue": int(qty)},
-            "timestamp": {"integerValue": int(requests.get("https://showcase.api.linx.twenty-six-distribution.com/time").json().get("unixtime", 0)*1000)},
+            "timestamp": {"integerValue": current_ms_time},
             "excel_data": {
                 "arrayValue": {
                     "values": formatted_rows
