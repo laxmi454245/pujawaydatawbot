@@ -2,7 +2,8 @@ import os
 import telebot
 import requests
 import pandas as pd
-import time  # Built-in module ka use
+import time
+from datetime import datetime
 
 # ================= CONFIGURATIONS =================
 BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"
@@ -11,8 +12,9 @@ FIREBASE_PROJECT_ID = "ss22-a96d3"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=50)
 
-# User state tracker (Temp Memory for steps)
+# User state tracker (Temp Memory for steps and running states)
 user_states = {}
+active_searches = {}  # Track ongoing search state for cancel action
 
 # ================= FIREBASE REST API HELPERS =================
 BASE_DB_URL = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
@@ -66,7 +68,6 @@ def update_balance(user_id, new_balance):
 def add_history_log(user_id, amount, reason, bp):
     """Har user ki dynamic transaction history log karne ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}/history"
-    # FIXED: Kisi external site se time lene ke bajaye direct Python local millisecond timestamp use kiya hai
     current_ms_time = int(time.time() * 1000)
     payload = {
         "fields": {
@@ -90,7 +91,6 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
             map_value[k] = {"stringValue": str(v)}
         formatted_rows.append({"mapValue": {"fields": map_value}})
 
-    # FIXED: Direct Python dynamic millisecond timestamp
     current_ms_time = int(time.time() * 1000)
     payload = {
         "fields": {
@@ -267,12 +267,23 @@ def get_ca_and_ask_qty(message):
     if not ca_no.isdigit():
         bot.reply_to(message, "❌ Invalid CA number! Sirf numbers enter karein:")
         return
+    
+    # Validation: 12-Digit Limit Constraint
+    if len(ca_no) > 12:
+        bot.reply_to(message, "❌ Request Failed! CA / BP Number 12 digit se zyada bada nahi ho sakta. Kripya dobara koshish karein:")
+        return
         
     user_states[user_id] = {
         "step": "waiting_qty",
         "base_ca": int(ca_no)
     }
     bot.reply_to(message, "📊 Is CA number ke aage aapko **kitni quantity** (serial sequence) autofill karni hai? (E.g. 5, 10, 50):")
+
+@bot.message_handler(func=lambda msg: msg.text == "🔴 Cancel Search" and msg.from_user.id in active_searches)
+def cancel_ongoing_search(message):
+    user_id = message.from_user.id
+    active_searches[user_id] = False  # Flag set to stop loop
+    bot.reply_to(message, "⏳ Request received. Bulk search ko beech me cancel kiya ja raha hai, please wait...")
 
 @bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("step") == "waiting_qty")
 def process_autofill_and_search(message):
@@ -302,12 +313,29 @@ def process_autofill_and_search(message):
         bot.send_message(message.chat.id, f"⚠️ Aapne {qty} requests ki hain, par aapke balance (₹{current_balance}) ke mutabik sirf **{max_possible_searches}** records process ho payenge.")
         ca_list = ca_list[:max_possible_searches]
     
-    status_msg = bot.send_message(message.chat.id, f"⏳ processing 0/{len(ca_list)} items... Please wait...")
+    # Adding Cancel Keyboard markup
+    cancel_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    cancel_markup.add("🔴 Cancel Search")
+    
+    status_msg = bot.send_message(
+        message.chat.id, 
+        f"⏳ processing 0/{len(ca_list)} items... Please wait...", 
+        reply_markup=cancel_markup
+    )
+    
+    # Set run status as True
+    active_searches[user_id] = True
     
     bulk_results = []
     deducted_total = 0
+    cancelled_by_user = False
     
     for idx, ca in enumerate(ca_list):
+        # Stop loop if user cancelled
+        if not active_searches.get(user_id, True):
+            cancelled_by_user = True
+            break
+            
         fresh_data = get_user_data(user_id)
         fresh_bal = fresh_data.get("balance", 0.0) if fresh_data else 0.0
         
@@ -399,8 +427,15 @@ def process_autofill_and_search(message):
                 bot.edit_message_text(f"⏳ Processing {idx + 1}/{len(ca_list)} items... Please wait...", message.chat.id, status_msg.message_id)
             except: pass
 
+    # Clean active search flag
+    active_searches.pop(user_id, None)
+
+    # Bring back the dashboard keys
+    dashboard_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    dashboard_markup.add("🔎 Start Bulk Search", "💰 Check Balance")
+
     if len(bulk_results) == 0:
-        bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.")
+        bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.", reply_markup=dashboard_markup)
         return
 
     try:
@@ -409,19 +444,36 @@ def process_autofill_and_search(message):
     except Exception as db_err:
         print(f"Firestore save error: {db_err}")
 
+    # Pure original Excel format (Excel sheet me koi extra columns add nahi kiye)
     df = pd.DataFrame(bulk_results)
+    
     file_name = f"Bulk_Bill_{user_id}.xlsx"
     df.to_excel(file_name, index=False)
     
     final_data = get_user_data(user_id)
     final_bal = final_data.get("balance", 0.0) if final_data else 0.0
     
+    # Custom format variables for caption
+    ist_datetime = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    caption_prefix = "🔴 **Search Cancelled by User!**\n\n" if cancelled_by_user else "✅ **Bulk Search Completed!**\n\n"
+    
+    # Telegram Document Caption me sabhi variables clear standard format me display honge
+    caption_text = f"""{caption_prefix}📊 **Invoice / Report Summary:**
+🕒 **Date time:** `{ist_datetime}`
+💬 **Chat id:** `{user_id}`
+🔢 **Ca number:** `{base_ca}`
+
+📈 Total Processed: `{len(bulk_results)}` items
+📉 Wallet Deducted: `₹{deducted_total}` (₹10/each)
+💰 Remaining Balance: `₹{final_bal}`"""
+
     with open(file_name, "rb") as file:
         bot.send_document(
             message.chat.id, 
             file, 
-            caption=f"✅ **Bulk Search Completed!**\n\n📊 Total Processed: `{len(bulk_results)}` items\n📉 Wallet Deducted: `₹{deducted_total}` (₹10/each)\n💰 Remaining Balance: `₹{final_bal}`",
-            parse_mode="Markdown"
+            caption=caption_text,
+            parse_mode="Markdown",
+            reply_markup=dashboard_markup
         )
         
     if os.path.exists(file_name):
