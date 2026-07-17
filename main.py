@@ -3,7 +3,10 @@ import telebot
 import requests
 import pandas as pd
 import time
+import json
+import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ================= CONFIGURATIONS =================
 BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"
@@ -12,15 +15,14 @@ FIREBASE_PROJECT_ID = "ss22-a96d3"
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=50)
 
-# User state tracker (Temp Memory for steps and running states)
+# User state tracker (Temp Memory)
 user_states = {}
-active_searches = {}  # Track ongoing search state for cancel action
+active_searches = {}
 
 # ================= FIREBASE REST API HELPERS =================
 BASE_DB_URL = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
 
 def get_user_data(user_id):
-    """Firestore se user profile aur balance check karne ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}"
     response = requests.get(url)
     if response.status_code == 200:
@@ -34,25 +36,22 @@ def get_user_data(user_id):
     return None
 
 def register_user(user_id, name, username):
-    """Naye user ko automatic register aur ₹5 Welcome Bonus dene ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}"
     payload = {
         "fields": {
             "user_id": {"stringValue": str(user_id)},
             "name": {"stringValue": name},
             "username": {"stringValue": username or "No_Username"},
-            "balance": {"doubleValue": 5.0}  # ₹5 welcome bonus
+            "balance": {"doubleValue": 5.0}
         }
     }
     requests.patch(url, json=payload)
     return {"user_id": str(user_id), "name": name, "username": username or "No_Username", "balance": 5.0}
 
 def update_balance(user_id, new_balance):
-    """Database me balance safe update karne ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}"
     current_data = get_user_data(user_id)
-    if not current_data:
-        return False
+    if not current_data: return False
     
     payload = {
         "fields": {
@@ -66,7 +65,6 @@ def update_balance(user_id, new_balance):
     return True
 
 def add_history_log(user_id, amount, reason, bp):
-    """Har user ki dynamic transaction history log karne ke liye"""
     url = f"{BASE_DB_URL}/bot_users/{user_id}/history"
     current_ms_time = int(time.time() * 1000)
     payload = {
@@ -81,7 +79,6 @@ def add_history_log(user_id, amount, reason, bp):
     requests.post(url, json=payload)
 
 def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_list):
-    """Admin Panel me list dikhane aur backup download karne ke liye data save karna"""
     url = f"{BASE_DB_URL}/search_history"
     
     formatted_rows = []
@@ -108,6 +105,73 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
     }
     requests.post(url, json=payload)
 
+# ================= BACKGROUND FIREBASE RESEND LISTENER =================
+def run_resend_checker_loop():
+    """Firestore me incoming and pending re-send requests dynamically check karne ke liye"""
+    while True:
+        try:
+            url = f"{BASE_DB_URL}/resend_requests"
+            response = requests.get(url)
+            if response.status_code == 200:
+                documents = response.json().get("documents", [])
+                for doc in documents:
+                    doc_id = doc.get("name", "").split("/")[-1]
+                    fields = doc.get("fields", {})
+                    status = fields.get("status", {}).get("stringValue", "pending")
+                    
+                    if status == "pending":
+                        target_user_id = fields.get("user_id", {}).get("stringValue")
+                        base_ca = fields.get("base_ca", {}).get("stringValue")
+                        date_time = fields.get("date_time", {}).get("stringValue")
+                        raw_excel_string = fields.get("excel_data", {}).get("stringValue")
+                        
+                        if target_user_id and raw_excel_string:
+                            try:
+                                parsed_data = json.loads(raw_excel_string)
+                                df = pd.DataFrame(parsed_data)
+                                
+                                temp_file = f"Resend_Report_{target_user_id}.xlsx"
+                                df.to_excel(temp_file, index=False)
+                                
+                                final_data = get_user_data(target_user_id)
+                                final_bal = final_data.get("balance", 0.0) if final_data else 0.0
+                                
+                                caption_text = f"""🔁 **Re-Sent Report (Admin Action):**
+📊 **Invoice / Report Summary:**
+🕒 **Date time:** `{date_time}`
+💬 **Chat id:** `{target_user_id}`
+🔢 **Ca number:** `{base_ca}`
+
+📈 Total Processed: `{len(df)}` items
+💰 Current Balance: `₹{final_bal}`"""
+                                
+                                # File delivery
+                                with open(temp_file, "rb") as file:
+                                    bot.send_document(
+                                        target_user_id, 
+                                        file, 
+                                        caption=caption_text,
+                                        parse_mode="Markdown"
+                                    )
+                                    
+                                if os.path.exists(temp_file):
+                                    os.remove(temp_file)
+                                    
+                            except Exception as parse_err:
+                                print(f"Resend Compilation Error: {parse_err}")
+                                
+                        # Delete request from database so it won't trigger again
+                        delete_url = f"{BASE_DB_URL}/resend_requests/{doc_id}"
+                        requests.delete(delete_url)
+                        
+        except Exception as loop_err:
+            print(f"Resend loop runtime issue: {loop_err}")
+        time.sleep(5)  # Real-time update checking interval (5 seconds)
+
+# Start background checker thread
+resend_thread = threading.Thread(target=run_resend_checker_loop, daemon=True)
+resend_thread.start()
+
 # ================= TELEGRAM ADMIN COMMANDS =================
 @bot.message_handler(commands=['admin'])
 def admin_help(message):
@@ -115,16 +179,9 @@ def admin_help(message):
     help_text = """
 👑 **Admin Control Panel**
 
-🔹 **Balance Add Karein:**
-`/add [User_ID] [Amount]`
-_Example: /add 987654321 50_
-
-🔹 **Balance Deduct Karein:**
-`/deduct [User_ID] [Amount]`
-_Example: /deduct 987654321 20_
-
-🔹 **User Info Check:**
-`/info [User_ID]`
+🔹 **Balance Add:** `/add [User_ID] [Amount]`
+🔹 **Balance Deduct:** `/deduct [User_ID] [Amount]`
+🔹 **User Info:** `/info [User_ID]`
 """
     bot.reply_to(message, help_text, parse_mode="Markdown")
 
@@ -202,7 +259,6 @@ def start_cmd(message):
     first_name = message.from_user.first_name
     
     data = get_user_data(user_id)
-    
     if not data:
         if not username:
             bot.reply_to(message, "👋 Welcome! Aapka Telegram Username set nahi hai. Kripya register karne ke liye apna **Pura Naam** likh kar bhejiye:")
@@ -268,7 +324,6 @@ def get_ca_and_ask_qty(message):
         bot.reply_to(message, "❌ Invalid CA number! Sirf numbers enter karein:")
         return
     
-    # Validation: 12-Digit Limit Constraint
     if len(ca_no) > 12:
         bot.reply_to(message, "❌ Request Failed! CA / BP Number 12 digit se zyada bada nahi ho sakta. Kripya dobara koshish karein:")
         return
@@ -282,8 +337,22 @@ def get_ca_and_ask_qty(message):
 @bot.message_handler(func=lambda msg: msg.text == "🔴 Cancel Search" and msg.from_user.id in active_searches)
 def cancel_ongoing_search(message):
     user_id = message.from_user.id
-    active_searches[user_id] = False  # Flag set to stop loop
+    active_searches[user_id] = False
     bot.reply_to(message, "⏳ Request received. Bulk search ko beech me cancel kiya ja raha hai, please wait...")
+
+
+# ================= HIGH-SPEED PARALLEL SEARCH WITH LIVE % PROGRESS =================
+def fetch_single_ca_data(ca):
+    """Single API hit function for parallel threading"""
+    try:
+        api_url = f"https://billguru.kzthubbjdo.workers.dev/?ca_no={ca}"
+        response = requests.get(api_url, timeout=8)
+        if response.status_code == 200:
+            raw_res = response.json()
+            return ca, raw_res.get("data", {})
+    except Exception as e:
+        print(f"Error fetching CA {ca}: {e}")
+    return ca, {}
 
 @bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("step") == "waiting_qty")
 def process_autofill_and_search(message):
@@ -313,34 +382,81 @@ def process_autofill_and_search(message):
         bot.send_message(message.chat.id, f"⚠️ Aapne {qty} requests ki hain, par aapke balance (₹{current_balance}) ke mutabik sirf **{max_possible_searches}** records process ho payenge.")
         ca_list = ca_list[:max_possible_searches]
     
-    # Adding Cancel Keyboard markup
     cancel_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     cancel_markup.add("🔴 Cancel Search")
     
+    # Starting state for Progress display
     status_msg = bot.send_message(
         message.chat.id, 
-        f"⏳ processing 0/{len(ca_list)} items... Please wait...", 
+        f"⚡ High-speed server initiating...\n📥 Progress: [░░░░░░░░░░] 0% (0/{len(ca_list)})", 
         reply_markup=cancel_markup
     )
     
-    # Set run status as True
     active_searches[user_id] = True
-    
     bulk_results = []
     deducted_total = 0
     cancelled_by_user = False
+
+    # ULTRA-SPEED: Ek sath 20 requests parallelly execute hongi!
+    num_workers = min(len(ca_list), 20) 
+    raw_api_responses = {}
     
-    for idx, ca in enumerate(ca_list):
-        # Stop loop if user cancelled
+    # Progress Bar UI Helper (10 Blocks)
+    def make_progress_bar(percent):
+        slices = int(percent // 10)
+        filled = "█" * slices
+        empty = "░" * (10 - slices)
+        return f"[{filled}{empty}]"
+
+    completed_count = 0
+    last_update_time = time.time()
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
         if not active_searches.get(user_id, True):
             cancelled_by_user = True
-            break
+        else:
+            # Submit all tasks simultaneously
+            futures = {executor.submit(fetch_single_ca_data, ca): ca for ca in ca_list}
             
+            # Real-time results stream as soon as any request finishes
+            for future in as_completed(futures):
+                if not active_searches.get(user_id, True):
+                    cancelled_by_user = True
+                    break
+                
+                ca_num, api_data = future.result()
+                raw_api_responses[ca_num] = api_data
+                completed_count += 1
+                
+                # Calculating live 0-100% percentage
+                percent = int((completed_count / len(ca_list)) * 100)
+                p_bar = make_progress_bar(percent)
+                
+                # Telegram flood control handle karne ke liye update speed limit
+                current_time = time.time()
+                if (current_time - last_update_time >= 1.2) or (completed_count == len(ca_list)):
+                    try:
+                        bot.edit_message_text(
+                            f"⚡ Processing data parallelly...\n📥 Progress: {p_bar} {percent}% ({completed_count}/{len(ca_list)})", 
+                            message.chat.id, 
+                            status_msg.message_id
+                        )
+                        last_update_time = current_time
+                    except:
+                        pass
+
+    if cancelled_by_user:
+        active_searches.pop(user_id, None)
+        bot.send_message(message.chat.id, "❌ Bulk search cancel kar di gayi.")
+        return
+
+    # Succeeded responses compile karna aur balance deduct karna
+    for ca in ca_list:
         fresh_data = get_user_data(user_id)
         fresh_bal = fresh_data.get("balance", 0.0) if fresh_data else 0.0
         
         if fresh_bal < 10.0:
-            bot.send_message(message.chat.id, "❌ Processing ke bich balance khatam ho gaya!")
+            bot.send_message(message.chat.id, "❌ Wallet balance limit reached! Kuch data process nahi ho paya.")
             break
             
         new_balance = fresh_bal - 10.0
@@ -348,15 +464,9 @@ def process_autofill_and_search(message):
         deducted_total += 10
         add_history_log(user_id, 10.0, "Bot Bulk Search", ca)
         
-        try:
-            api_url = f"https://billguru.kzthubbjdo.workers.dev/?ca_no={ca}"
-            response = requests.get(api_url, timeout=10)
-            if response.status_code == 200:
-                raw_res = response.json()
-                d = raw_res.get("data", {})
-            else: d = {}
-        except: d = {}
-            
+        d = raw_api_responses.get(ca, {})
+        
+        # Pure same excel schema, koi column change nahi hai
         row = {
             "Name": d.get("Name", "Not Found"),
             "Mobile_No": d.get("Mobile_No", "Not Found"),
@@ -421,16 +531,9 @@ def process_autofill_and_search(message):
             "LOGOTP": d.get("LOGOTP", "")
         }
         bulk_results.append(row)
-        
-        if (idx + 1) % 2 == 0 or (idx + 1) == len(ca_list):
-            try:
-                bot.edit_message_text(f"⏳ Processing {idx + 1}/{len(ca_list)} items... Please wait...", message.chat.id, status_msg.message_id)
-            except: pass
 
-    # Clean active search flag
     active_searches.pop(user_id, None)
 
-    # Bring back the dashboard keys
     dashboard_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     dashboard_markup.add("🔎 Start Bulk Search", "💰 Check Balance")
 
@@ -444,21 +547,19 @@ def process_autofill_and_search(message):
     except Exception as db_err:
         print(f"Firestore save error: {db_err}")
 
-    # Pure original Excel format (Excel sheet me koi extra columns add nahi kiye)
+    # Export exactly like before
     df = pd.DataFrame(bulk_results)
-    
     file_name = f"Bulk_Bill_{user_id}.xlsx"
     df.to_excel(file_name, index=False)
     
     final_data = get_user_data(user_id)
     final_bal = final_data.get("balance", 0.0) if final_data else 0.0
     
-    # Custom format variables for caption
     ist_datetime = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    caption_prefix = "🔴 **Search Cancelled by User!**\n\n" if cancelled_by_user else "✅ **Bulk Search Completed!**\n\n"
     
-    # Telegram Document Caption me sabhi variables clear standard format me display honge
-    caption_text = f"""{caption_prefix}📊 **Invoice / Report Summary:**
+    caption_text = f"""✅ **Bulk Search Completed!**
+
+📊 **Invoice / Report Summary:**
 🕒 **Date time:** `{ist_datetime}`
 💬 **Chat id:** `{user_id}`
 🔢 **Ca number:** `{base_ca}`
@@ -480,5 +581,5 @@ def process_autofill_and_search(message):
         os.remove(file_name)
 
 if __name__ == "__main__":
-    print("🤖 BABA MNGL Multi-threaded Bot successfully connected with Firebase and running fine...")
+    print("🤖 BABA MNGL Multi-threaded Bot running and monitoring background resends...")
     bot.infinity_polling()
