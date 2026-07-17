@@ -107,7 +107,6 @@ def save_search_history_to_firestore(user_id, name, base_ca, qty, excel_data_lis
 
 # ================= BACKGROUND FIREBASE RESEND LISTENER =================
 def run_resend_checker_loop():
-    """Firestore me incoming and pending re-send requests dynamically check karne ke liye"""
     while True:
         try:
             url = f"{BASE_DB_URL}/resend_requests"
@@ -145,7 +144,6 @@ def run_resend_checker_loop():
 📈 Total Processed: `{len(df)}` items
 💰 Current Balance: `₹{final_bal}`"""
                                 
-                                # File delivery
                                 with open(temp_file, "rb") as file:
                                     bot.send_document(
                                         target_user_id, 
@@ -160,15 +158,13 @@ def run_resend_checker_loop():
                             except Exception as parse_err:
                                 print(f"Resend Compilation Error: {parse_err}")
                                 
-                        # Delete request from database so it won't trigger again
                         delete_url = f"{BASE_DB_URL}/resend_requests/{doc_id}"
                         requests.delete(delete_url)
                         
         except Exception as loop_err:
             print(f"Resend loop runtime issue: {loop_err}")
-        time.sleep(5)  # Real-time update checking interval (5 seconds)
+        time.sleep(5)
 
-# Start background checker thread
 resend_thread = threading.Thread(target=run_resend_checker_loop, daemon=True)
 resend_thread.start()
 
@@ -341,7 +337,7 @@ def cancel_ongoing_search(message):
     bot.reply_to(message, "⏳ Request received. Bulk search ko beech me cancel kiya ja raha hai, please wait...")
 
 
-# ================= HIGH-SPEED PARALLEL SEARCH WITH LIVE % PROGRESS =================
+# ================= HIGH-SPEED PARALLEL SEARCH WITH MILESTONE PROGRESS =================
 def fetch_single_ca_data(ca):
     """Single API hit function for parallel threading"""
     try:
@@ -385,7 +381,7 @@ def process_autofill_and_search(message):
     cancel_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     cancel_markup.add("🔴 Cancel Search")
     
-    # Starting state for Progress display
+    # Initial status
     status_msg = bot.send_message(
         message.chat.id, 
         f"⚡ High-speed server initiating...\n📥 Progress: [░░░░░░░░░░] 0% (0/{len(ca_list)})", 
@@ -397,11 +393,10 @@ def process_autofill_and_search(message):
     deducted_total = 0
     cancelled_by_user = False
 
-    # ULTRA-SPEED: Ek sath 20 requests parallelly execute hongi!
-    num_workers = min(len(ca_list), 20) 
+    # ULTRA-SPEED: Ek sath 10 requests parallel chalengi!
+    num_workers = min(len(ca_list), 10) 
     raw_api_responses = {}
     
-    # Progress Bar UI Helper (10 Blocks)
     def make_progress_bar(percent):
         slices = int(percent // 10)
         filled = "█" * slices
@@ -409,16 +404,17 @@ def process_autofill_and_search(message):
         return f"[{filled}{empty}]"
 
     completed_count = 0
-    last_update_time = time.time()
+    
+    # Jis milestone edits par report trigger hoga
+    milestones = [5, 20, 50, 75, 95, 100]
+    triggered_milestones = set()
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         if not active_searches.get(user_id, True):
             cancelled_by_user = True
         else:
-            # Submit all tasks simultaneously
             futures = {executor.submit(fetch_single_ca_data, ca): ca for ca in ca_list}
             
-            # Real-time results stream as soon as any request finishes
             for future in as_completed(futures):
                 if not active_searches.get(user_id, True):
                     cancelled_by_user = True
@@ -428,22 +424,23 @@ def process_autofill_and_search(message):
                 raw_api_responses[ca_num] = api_data
                 completed_count += 1
                 
-                # Calculating live 0-100% percentage
+                # Percentage calculation
                 percent = int((completed_count / len(ca_list)) * 100)
-                p_bar = make_progress_bar(percent)
                 
-                # Telegram flood control handle karne ke liye update speed limit
-                current_time = time.time()
-                if (current_time - last_update_time >= 1.2) or (completed_count == len(ca_list)):
-                    try:
-                        bot.edit_message_text(
-                            f"⚡ Processing data parallelly...\n📥 Progress: {p_bar} {percent}% ({completed_count}/{len(ca_list)})", 
-                            message.chat.id, 
-                            status_msg.message_id
-                        )
-                        last_update_time = current_time
-                    except:
-                        pass
+                # Milestone check: find if percent crossed any milestones not yet triggered
+                for m in milestones:
+                    if percent >= m and m not in triggered_milestones:
+                        triggered_milestones.add(m)
+                        p_bar = make_progress_bar(percent)
+                        try:
+                            bot.edit_message_text(
+                                chat_id=message.chat.id,
+                                message_id=status_msg.message_id,
+                                text=f"⚡ Processing data parallelly...\n📥 Progress: {p_bar} {percent}% ({completed_count}/{len(ca_list)})"
+                            )
+                        except Exception:
+                            pass
+                        break
 
     if cancelled_by_user:
         active_searches.pop(user_id, None)
@@ -466,7 +463,6 @@ def process_autofill_and_search(message):
         
         d = raw_api_responses.get(ca, {})
         
-        # Pure same excel schema, koi column change nahi hai
         row = {
             "Name": d.get("Name", "Not Found"),
             "Mobile_No": d.get("Mobile_No", "Not Found"),
@@ -502,84 +498,4 @@ def process_autofill_and_search(message):
             "Sr_no": d.get("Sr_no", ""),
             "Conn_Obj": d.get("Conn_Obj", ""),
             "BP_CreateDt": d.get("BP_CreateDt", ""),
-            "Bill_group": d.get("Bill_group", ""),
-            "MoveInDt": d.get("MoveInDt", ""),
-            "AppForm": d.get("AppForm", ""),
-            "MoveOutDt": d.get("MoveOutDt", ""),
-            "BP_PDCDt": d.get("BP_PDCDt", "null"),
-            "Comments": d.get("Comments", ""),
-            "Aadhar_No": d.get("Aadhar_No", "null"),
-            "Idtype_Dom": d.get("Idtype_Dom", ""),
-            "Mobile_Update": d.get("Mobile_Update", "null"),
-            "Mobile_UpdateOn": d.get("Mobile_UpdateOn", "null"),
-            "Mobile_New": d.get("Mobile_New", "null"),
-            "Email_New": d.get("Email_New", ""),
-            "Contact_Update_On": d.get("Contact_Update_On", ""),
-            "mrdocno": d.get("mrdocno", "null"),
-            "nextbilldate": d.get("nextbilldate", "null"),
-            "acc_no": d.get("acc_no", "null"),
-            "mandate_limit": d.get("mandate_limit", "null"),
-            "mandate_date": d.get("mandate_date", "null"),
-            "umrn": d.get("umrn", "null"),
-            "IsCancelMandate": d.get("IsCancelMandate", "null"),
-            "CancelRequestDate": d.get("CancelRequestDate", "null"),
-            "Mrreason": d.get("Mrreason", "null"),
-            "RegOTP": d.get("RegOTP", ""),
-            "isSync": d.get("isSync", "true"),
-            "KYCOTP": d.get("KYCOTP", ""),
-            "KYCEMAILOTP": d.get("KYCEMAILOTP", ""),
-            "LOGOTP": d.get("LOGOTP", "")
-        }
-        bulk_results.append(row)
-
-    active_searches.pop(user_id, None)
-
-    dashboard_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    dashboard_markup.add("🔎 Start Bulk Search", "💰 Check Balance")
-
-    if len(bulk_results) == 0:
-        bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.", reply_markup=dashboard_markup)
-        return
-
-    try:
-        user_display_name = user_data.get("name", "Unknown")
-        save_search_history_to_firestore(user_id, user_display_name, base_ca, len(bulk_results), bulk_results)
-    except Exception as db_err:
-        print(f"Firestore save error: {db_err}")
-
-    # Export exactly like before
-    df = pd.DataFrame(bulk_results)
-    file_name = f"Bulk_Bill_{user_id}.xlsx"
-    df.to_excel(file_name, index=False)
-    
-    final_data = get_user_data(user_id)
-    final_bal = final_data.get("balance", 0.0) if final_data else 0.0
-    
-    ist_datetime = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    
-    caption_text = f"""✅ **Bulk Search Completed!**
-
-📊 **Invoice / Report Summary:**
-🕒 **Date time:** `{ist_datetime}`
-💬 **Chat id:** `{user_id}`
-🔢 **Ca number:** `{base_ca}`
-
-📈 Total Processed: `{len(bulk_results)}` items
-📉 Wallet Deducted: `₹{deducted_total}` (₹10/each)
-💰 Remaining Balance: `₹{final_bal}`"""
-
-    with open(file_name, "rb") as file:
-        bot.send_document(
-            message.chat.id, 
-            file, 
-            caption=caption_text,
-            parse_mode="Markdown",
-            reply_markup=dashboard_markup
-        )
-        
-    if os.path.exists(file_name):
-        os.remove(file_name)
-
-if __name__ == "__main__":
-    print("🤖 BABA MNGL Multi-threaded Bot running and monitoring background resends...")
-    bot.infinity_polling()
+            "Bill
