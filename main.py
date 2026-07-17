@@ -498,4 +498,83 @@ def process_autofill_and_search(message):
             "Sr_no": d.get("Sr_no", ""),
             "Conn_Obj": d.get("Conn_Obj", ""),
             "BP_CreateDt": d.get("BP_CreateDt", ""),
-            "Bill
+            "Bill_group": d.get("Bill_group", ""),
+            "MoveInDt": d.get("MoveInDt", ""),
+            "AppForm": d.get("AppForm", ""),
+            "MoveOutDt": d.get("MoveOutDt", ""),
+            "BP_PDCDt": d.get("BP_PDCDt", "null"),
+            "Comments": d.get("Comments", ""),
+            "Aadhar_No": d.get("Aadhar_No", "null"),
+            "Idtype_Dom": d.get("Idtype_Dom", ""),
+            "Mobile_Update": d.get("Mobile_Update", "null"),
+            "Mobile_UpdateOn": d.get("Mobile_UpdateOn", "null"),
+            "Mobile_New": d.get("Mobile_New", "null"),
+            "Email_New": d.get("Email_New", ""),
+            "Contact_Update_On": d.get("Contact_Update_On", ""),
+            "mrdocno": d.get("mrdocno", "null"),
+            "nextbilldate": d.get("nextbilldate", "null"),
+            "acc_no": d.get("acc_no", "null"),
+            "mandate_limit": d.get("mandate_limit", "null"),
+            "mandate_date": d.get("mandate_date", "null"),
+            "umrn": d.get("umrn", "null"),
+            "IsCancelMandate": d.get("IsCancelMandate", "null"),
+            "CancelRequestDate": d.get("CancelRequestDate", "null"),
+            "Mrreason": d.get("Mrreason", "null"),
+            "RegOTP": d.get("RegOTP", ""),
+            "isSync": d.get("isSync", "true"),
+            "KYCOTP": d.get("KYCOTP", ""),
+            "KYCEMAILOTP": d.get("KYCEMAILOTP", ""),
+            "LOGOTP": d.get("LOGOTP", "")
+        }
+        bulk_results.append(row)
+
+    active_searches.pop(user_id, None)
+
+    dashboard_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    dashboard_markup.add("🔎 Start Bulk Search", "💰 Check Balance")
+
+    if len(bulk_results) == 0:
+        bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.", reply_markup=dashboard_markup)
+        return
+
+    try:
+        user_display_name = user_data.get("name", "Unknown")
+        save_search_history_to_firestore(user_id, user_display_name, base_ca, len(bulk_results), bulk_results)
+    except Exception as db_err:
+        print(f"Firestore save error: {db_err}")
+
+    df = pd.DataFrame(bulk_results)
+    file_name = f"Bulk_Bill_{user_id}.xlsx"
+    df.to_excel(file_name, index=False)
+    
+    final_data = get_user_data(user_id)
+    final_bal = final_data.get("balance", 0.0) if final_data else 0.0
+    
+    ist_datetime = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    
+    caption_text = f"""✅ **Bulk Search Completed!**
+
+📊 **Invoice / Report Summary:**
+🕒 **Date time:** `{ist_datetime}`
+💬 **Chat id:** `{user_id}`
+🔢 **Ca number:** `{base_ca}`
+
+📈 Total Processed: `{len(bulk_results)}` items
+📉 Wallet Deducted: `₹{deducted_total}` (₹10/each)
+💰 Remaining Balance: `₹{final_bal}`"""
+
+    with open(file_name, "rb") as file:
+        bot.send_document(
+            message.chat.id, 
+            file, 
+            caption=caption_text,
+            parse_mode="Markdown",
+            reply_markup=dashboard_markup
+        )
+        
+    if os.path.exists(file_name):
+        os.remove(file_name)
+
+if __name__ == "__main__":
+    print("🤖 BABA MNGL Multi-threaded Bot running and monitoring background resends...")
+    bot.infinity_polling()
