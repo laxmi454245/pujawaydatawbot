@@ -42,7 +42,7 @@ def register_user(user_id, name, username):
             "user_id": {"stringValue": str(user_id)},
             "name": {"stringValue": name},
             "username": {"stringValue": username or "No_Username"},
-            "balance": {"doubleValue": 5.0}
+            "balance": {"doubleValue": 12.0}
         }
     }
     requests.patch(url, json=payload)
@@ -266,12 +266,12 @@ def start_cmd(message):
         send_dashboard(message, data)
 
 def send_dashboard(message, data, welcome=False):
-    welcome_msg = "🎁 Aapko ₹5 Free Welcome Bonus credit kar diya gaya hai!\n\n" if welcome else ""
+    welcome_msg = "🎁 Aapko ₹12 Free Welcome Bonus credit kar diya gaya hai!\n\n" if welcome else ""
     dashboard = f"""
 {welcome_msg}👋 **Hello, {data.get('name')}!**
 
 💰 **Wallet Balance:** ₹{data.get('balance')}
-📋 **Rate:** ₹10 per Consumer Search
+📋 **Rate:** ₹12 per Consumer Search
 
 🔎 Bulk search start karne ke liye niche diya gaya button dabayein ya direct `/search` type karein.
 """
@@ -293,8 +293,8 @@ def ask_ca_number(message):
         bot.reply_to(message, "⚠️ Pehle `/start` karke register karein.")
         return
         
-    if data.get("balance", 0.0) < 10.0:
-        bot.reply_to(message, f"❌ Aapka balance insufficient hai (₹{data.get('balance')}). Search ke liye kam se kam ₹10 hone chahiye.")
+    if data.get("balance", 0.0) < 12.0:
+        bot.reply_to(message, f"❌ Aapka balance insufficient hai (₹{data.get('balance')}). Search ke liye kam se kam ₹12 hone chahiye.")
         return
         
     bot.send_message(message.chat.id, "🔢 Kripya pehla **CA / BP Number** enter karein:")
@@ -371,7 +371,7 @@ def process_autofill_and_search(message):
     max_possible_searches = int(current_balance // 10.0)
     
     if max_possible_searches == 0:
-        bot.reply_to(message, "❌ Aapke wallet me minimum 1 search (₹10) ke liye bhi balance nahi hai.")
+        bot.reply_to(message, "❌ Aapke wallet me minimum 1 search (₹12) ke liye bhi balance nahi hai.")
         return
         
     if qty > max_possible_searches:
@@ -394,7 +394,7 @@ def process_autofill_and_search(message):
     cancelled_by_user = False
 
     # ULTRA-SPEED: Ek sath 10 requests parallel chalengi!
-    num_workers = min(len(ca_list), 10) 
+    num_workers = min(len(ca_list), 12) 
     raw_api_responses = {}
     
     def make_progress_bar(percent):
@@ -452,14 +452,14 @@ def process_autofill_and_search(message):
         fresh_data = get_user_data(user_id)
         fresh_bal = fresh_data.get("balance", 0.0) if fresh_data else 0.0
         
-        if fresh_bal < 10.0:
+        if fresh_bal < 12.0:
             bot.send_message(message.chat.id, "❌ Wallet balance limit reached! Kuch data process nahi ho paya.")
             break
             
-        new_balance = fresh_bal - 10.0
+        new_balance = fresh_bal - 12.0
         update_balance(user_id, new_balance)
-        deducted_total += 10
-        add_history_log(user_id, 10.0, "Bot Bulk Search", ca)
+        deducted_total += 12
+        add_history_log(user_id, 12.0, "Bot Bulk Search", ca)
         
         d = raw_api_responses.get(ca, {})
         
@@ -560,7 +560,7 @@ def process_autofill_and_search(message):
 🔢 **Ca number:** `{base_ca}`
 
 📈 Total Processed: `{len(bulk_results)}` items
-📉 Wallet Deducted: `₹{deducted_total}` (₹10/each)
+📉 Wallet Deducted: `₹{deducted_total}` (₹12/each)
 💰 Remaining Balance: `₹{final_bal}`"""
 
     with open(file_name, "rb") as file:
