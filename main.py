@@ -24,15 +24,18 @@ BASE_DB_URL = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_I
 
 def get_user_data(user_id):
     url = f"{BASE_DB_URL}/bot_users/{user_id}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        fields = response.json().get("fields", {})
-        return {
-            "user_id": fields.get("user_id", {}).get("stringValue"),
-            "name": fields.get("name", {}).get("stringValue"),
-            "username": fields.get("username", {}).get("stringValue"),
-            "balance": float(fields.get("balance", {}).get("doubleValue" if "doubleValue" in fields.get("balance", {}) else "integerValue", 0))
-        }
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            fields = response.json().get("fields", {})
+            return {
+                "user_id": fields.get("user_id", {}).get("stringValue"),
+                "name": fields.get("name", {}).get("stringValue"),
+                "username": fields.get("username", {}).get("stringValue"),
+                "balance": float(fields.get("balance", {}).get("doubleValue" if "doubleValue" in fields.get("balance", {}) else "integerValue", 0))
+            }
+    except Exception as e:
+        print(f"Error fetching user data: {e}")
     return None
 
 def register_user(user_id, name, username):
@@ -46,7 +49,7 @@ def register_user(user_id, name, username):
         }
     }
     requests.patch(url, json=payload)
-    return {"user_id": str(user_id), "name": name, "username": username or "No_Username", "balance": 5.0}
+    return {"user_id": str(user_id), "name": name, "username": username or "No_Username", "balance": 12.0}
 
 def update_balance(user_id, new_balance):
     url = f"{BASE_DB_URL}/bot_users/{user_id}"
@@ -72,7 +75,7 @@ def add_history_log(user_id, amount, reason, bp):
             "type": {"stringValue": "deduct"},
             "amount": {"doubleValue": float(amount)},
             "reason": {"stringValue": reason},
-            "bp": {"stringValue": bp},
+            "bp": {"stringValue": str(bp)},
             "time": {"integerValue": current_ms_time}
         }
     }
@@ -110,7 +113,7 @@ def run_resend_checker_loop():
     while True:
         try:
             url = f"{BASE_DB_URL}/resend_requests"
-            response = requests.get(url)
+            response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 documents = response.json().get("documents", [])
                 for doc in documents:
@@ -271,7 +274,7 @@ def send_dashboard(message, data, welcome=False):
 {welcome_msg}👋 **Hello, {data.get('name')}!**
 
 💰 **Wallet Balance:** ₹{data.get('balance')}
-📋 **Rate:** ₹12 per Consumer Search
+📋 **Rate:** ₹12 per Valid Consumer Search
 
 🔎 Bulk search start karne ke liye niche diya gaya button dabayein ya direct `/search` type karein.
 """
@@ -328,7 +331,7 @@ def get_ca_and_ask_qty(message):
         "step": "waiting_qty",
         "base_ca": int(ca_no)
     }
-    bot.reply_to(message, "📊 Is CA number ke aage aapko **kitni quantity** (serial sequence) autofill karni hai? (E.g. 5, 10, 50):")
+    bot.reply_to(message, "📊 Aapko **kitne valid (Mobile_New wale) records** chahiye? (E.g. 5, 10, 50):")
 
 @bot.message_handler(func=lambda msg: msg.text == "🔴 Cancel Search" and msg.from_user.id in active_searches)
 def cancel_ongoing_search(message):
@@ -336,8 +339,7 @@ def cancel_ongoing_search(message):
     active_searches[user_id] = False
     bot.reply_to(message, "⏳ Request received. Bulk search ko beech me cancel kiya ja raha hai, please wait...")
 
-
-# ================= HIGH-SPEED PARALLEL SEARCH WITH MILESTONE PROGRESS =================
+# ================= SINGLE FETCH FUNCTION =================
 def fetch_single_ca_data(ca):
     """Single API hit function for parallel threading"""
     try:
@@ -350,6 +352,7 @@ def fetch_single_ca_data(ca):
         print(f"Error fetching CA {ca}: {e}")
     return ca, {}
 
+# ================= CONTINUOUS PARALLEL SEARCH UNTIL TARGET REACHED =================
 @bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("step") == "waiting_qty")
 def process_autofill_and_search(message):
     user_id = message.from_user.id
@@ -359,222 +362,164 @@ def process_autofill_and_search(message):
         bot.reply_to(message, "❌ Valid integer quantity dalein (Minimum 1):")
         return
         
-    qty = int(qty_text)
+    required_valid_qty = int(qty_text)
     state = user_states.get(user_id)
     base_ca = state["base_ca"]
-    
-    ca_list = [str(base_ca + i) for i in range(qty)]
     user_states.pop(user_id, None)
-    
-    user_data = get_user_data(user_id)
-    current_balance = user_data.get("balance", 0.0)
-    max_possible_searches = int(current_balance // 10.0)
-    
-    if max_possible_searches == 0:
-        bot.reply_to(message, "❌ Aapke wallet me minimum 1 search (₹12) ke liye bhi balance nahi hai.")
-        return
-        
-    if qty > max_possible_searches:
-        bot.send_message(message.chat.id, f"⚠️ Aapne {qty} requests ki hain, par aapke balance (₹{current_balance}) ke mutabik sirf **{max_possible_searches}** records process ho payenge.")
-        ca_list = ca_list[:max_possible_searches]
     
     cancel_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     cancel_markup.add("🔴 Cancel Search")
     
-    # Initial status
     status_msg = bot.send_message(
         message.chat.id, 
-        f"⚡ High-speed server initiating...\n📥 Progress: [░░░░░░░░░░] 0% (0/{len(ca_list)})", 
+        f"⚡ Searching for Valid Records...\n✅ Valid: 0/{required_valid_qty} | ❌ Invalid: 0", 
         reply_markup=cancel_markup
     )
     
     active_searches[user_id] = True
     bulk_results = []
     deducted_total = 0
+    invalid_count = 0
+    current_ca_offset = 0
     cancelled_by_user = False
+    last_update_time = time.time()
 
-    # ULTRA-SPEED: Ek sath 10 requests parallel chalengi!
-    num_workers = min(len(ca_list), 12) 
-    raw_api_responses = {}
-    
-    def make_progress_bar(percent):
-        slices = int(percent // 10)
-        filled = "█" * slices
-        empty = "░" * (10 - slices)
-        return f"[{filled}{empty}]"
-
-    completed_count = 0
-    
-    # Jis milestone edits par report trigger hoga
-    milestones = [5, 20, 50, 75, 95, 100]
-    triggered_milestones = set()
-
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    # Dynamic loop running until target required_valid_qty is achieved
+    while len(bulk_results) < required_valid_qty:
         if not active_searches.get(user_id, True):
             cancelled_by_user = True
-        else:
-            futures = {executor.submit(fetch_single_ca_data, ca): ca for ca in ca_list}
-            
-            for future in as_completed(futures):
-                if not active_searches.get(user_id, True):
-                    cancelled_by_user = True
-                    break
-                
-                ca_num, api_data = future.result()
-                raw_api_responses[ca_num] = api_data
-                completed_count += 1
-                
-                # Percentage calculation
-                percent = int((completed_count / len(ca_list)) * 100)
-                
-                # Milestone check: find if percent crossed any milestones not yet triggered
-                for m in milestones:
-                    if percent >= m and m not in triggered_milestones:
-                        triggered_milestones.add(m)
-                        p_bar = make_progress_bar(percent)
-                        try:
-                            bot.edit_message_text(
-                                chat_id=message.chat.id,
-                                message_id=status_msg.message_id,
-                                text=f"⚡ Processing data parallelly...\n📥 Progress: {p_bar} {percent}% ({completed_count}/{len(ca_list)})"
-                            )
-                        except Exception:
-                            pass
-                        break
-
-    if cancelled_by_user:
-        active_searches.pop(user_id, None)
-        bot.send_message(message.chat.id, "❌ Bulk search cancel kar di gayi.")
-        return
-
-    # Succeeded responses compile karna aur balance deduct karna
-    for ca in ca_list:
-        fresh_data = get_user_data(user_id)
-        fresh_bal = fresh_data.get("balance", 0.0) if fresh_data else 0.0
-        
-        if fresh_bal < 12.0:
-            bot.send_message(message.chat.id, "❌ Wallet balance limit reached! Kuch data process nahi ho paya.")
             break
             
-        new_balance = fresh_bal - 12.0
-        update_balance(user_id, new_balance)
-        deducted_total += 12
-        add_history_log(user_id, 12.0, "Bot Bulk Search", ca)
-        
-        d = raw_api_responses.get(ca, {})
-        
-        row = {
-            "Name": d.get("Name", "Not Found"),
-            "Mobile_No": d.get("Mobile_No", "Not Found"),
-            "Email": d.get("Email", "Not Found"),
-            "Contract_Account": d.get("Contract_Account", ca),
-            "Partner": d.get("Partner", "null"),
-            "Legacy_CRN": d.get("Legacy_CRN", "0"),
-            "Plot_No": d.get("Plot_No", ""),
-            "Flat_No": d.get("Flat_No", ""),
-            "Floor": d.get("Floor", ""),
-            "Wing": d.get("Wing", ""),
-            "Bldg_Name": d.get("Bldg_Name", ""),
-            "Colony": d.get("Colony", ""),
-            "Road_name": d.get("Road_name", ""),
-            "Land_Mark": d.get("Land_Mark", ""),
-            "Location": d.get("Location", ""),
-            "City": d.get("City", ""),
-            "Postal_code": d.get("Postal_code", ""),
-            "Tel_No": d.get("Tel_No", ""),
-            "Drs": d.get("Drs", ""),
-            "Amount": d.get("Amount", ""),
-            "Due_Date": d.get("Due_Date", ""),
-            "Bill_Date": d.get("Bill_Date", ""),
-            "Dispatch_Date": d.get("Dispatch_Date", ""),
-            "Meter_No": d.get("Meter_No", "null"),
-            "VIP": d.get("VIP", ""),
-            "Modify_date": d.get("Modify_date", ""),
-            "Create_date": d.get("Create_date", ""),
-            "Bill_mon": d.get("Bill_mon", ""),
-            "Opening": d.get("Opening", ""),
-            "Closing": d.get("Closing", ""),
-            "Bill_no": d.get("Bill_no", ""),
-            "Sr_no": d.get("Sr_no", ""),
-            "Conn_Obj": d.get("Conn_Obj", ""),
-            "BP_CreateDt": d.get("BP_CreateDt", ""),
-            "Bill_group": d.get("Bill_group", ""),
-            "MoveInDt": d.get("MoveInDt", ""),
-            "AppForm": d.get("AppForm", ""),
-            "MoveOutDt": d.get("MoveOutDt", ""),
-            "BP_PDCDt": d.get("BP_PDCDt", "null"),
-            "Comments": d.get("Comments", ""),
-            "Aadhar_No": d.get("Aadhar_No", "null"),
-            "Idtype_Dom": d.get("Idtype_Dom", ""),
-            "Mobile_Update": d.get("Mobile_Update", "null"),
-            "Mobile_UpdateOn": d.get("Mobile_UpdateOn", "null"),
-            "Mobile_New": d.get("Mobile_New", "null"),
-            "Email_New": d.get("Email_New", ""),
-            "Contact_Update_On": d.get("Contact_Update_On", ""),
-            "mrdocno": d.get("mrdocno", "null"),
-            "nextbilldate": d.get("nextbilldate", "null"),
-            "acc_no": d.get("acc_no", "null"),
-            "mandate_limit": d.get("mandate_limit", "null"),
-            "mandate_date": d.get("mandate_date", "null"),
-            "umrn": d.get("umrn", "null"),
-            "IsCancelMandate": d.get("IsCancelMandate", "null"),
-            "CancelRequestDate": d.get("CancelRequestDate", "null"),
-            "Mrreason": d.get("Mrreason", "null"),
-            "RegOTP": d.get("RegOTP", ""),
-            "isSync": d.get("isSync", "true"),
-            "KYCOTP": d.get("KYCOTP", ""),
-            "KYCEMAILOTP": d.get("KYCEMAILOTP", ""),
-            "LOGOTP": d.get("LOGOTP", "")
-        }
-        bulk_results.append(row)
+        # Check wallet before next batch
+        user_data = get_user_data(user_id)
+        current_bal = user_data.get("balance", 0.0) if user_data else 0.0
+        if current_bal < 12.0:
+            bot.send_message(message.chat.id, "⚠️ Wallet balance limit reached! Search complete process nahi ho payi.")
+            break
+
+        # Generate a small parallel chunk (10 requests at a time)
+        batch_size = min(10, (required_valid_qty - len(bulk_results)) * 2)
+        ca_batch = [str(base_ca + current_ca_offset + i) for i in range(batch_size)]
+        current_ca_offset += batch_size
+
+        batch_responses = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_single_ca_data, ca): ca for ca in ca_batch}
+            for future in as_completed(futures):
+                ca_num, api_data = future.result()
+                batch_responses[ca_num] = api_data
+
+        # Process batch results
+        for ca in ca_batch:
+            if not active_searches.get(user_id, True):
+                cancelled_by_user = True
+                break
+                
+            d = batch_responses.get(ca, {})
+            mobile_new = d.get("Mobile_New")
+
+            # VALIDITY CHECK: Mobile_New must be non-empty string
+            if mobile_new and str(mobile_new).strip() != "" and str(mobile_new).strip().lower() != "null":
+                # Re-verify Wallet & Deduct only for valid records
+                user_data = get_user_data(user_id)
+                current_bal = user_data.get("balance", 0.0) if user_data else 0.0
+                if current_bal < 12.0:
+                    bot.send_message(message.chat.id, "⚠️ Wallet balance finished during processing.")
+                    break
+
+                new_bal = current_bal - 12.0
+                update_balance(user_id, new_bal)
+                deducted_total += 12
+                add_history_log(user_id, 12.0, "Bulk Search Valid Record", ca)
+
+                # Exactly same layout & dynamic JSON structure as HTML Code
+                row = {
+                    "Name": d.get("Name", "Not Found"),                      # Col A
+                    "Mobile_New": mobile_new,                                # Col B
+                    "Email": d.get("Email", "Not Found"),                    # Col C
+                    "Contract_Account": d.get("Contract_Account", ca),       # Col D
+                    "Partner": d.get("Partner", "")                          # Col E
+                }
+                
+                # Auto-fill remaining API fields dynamically in sequence
+                for key, val in d.items():
+                    if key not in row:
+                        row[key] = val if val is not None else ""
+
+                bulk_results.append(row)
+
+                if len(bulk_results) >= required_valid_qty:
+                    break
+            else:
+                invalid_count += 1
+
+        # Smooth UI progress updates (throttled to avoid Telegram Rate Limits)
+        if time.time() - last_update_time > 1.5:
+            try:
+                bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id,
+                    text=f"⚡ Searching for Valid Records...\n✅ Valid: {len(bulk_results)}/{required_valid_qty} | ❌ Invalid: {invalid_count}",
+                    reply_markup=cancel_markup
+                )
+                last_update_time = time.time()
+            except Exception:
+                pass
 
     active_searches.pop(user_id, None)
 
     dashboard_markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     dashboard_markup.add("🔎 Start Bulk Search", "💰 Check Balance")
 
+    if cancelled_by_user and len(bulk_results) == 0:
+        bot.send_message(message.chat.id, "❌ Bulk search cancel kar di gayi.", reply_markup=dashboard_markup)
+        return
+
     if len(bulk_results) == 0:
-        bot.send_message(message.chat.id, "❌ Koi data fetch nahi ho paya.", reply_markup=dashboard_markup)
+        bot.send_message(message.chat.id, "❌ Koi valid record (Mobile_New) nahi mila.", reply_markup=dashboard_markup)
         return
 
     try:
-        user_display_name = user_data.get("name", "Unknown")
+        user_data = get_user_data(user_id)
+        user_display_name = user_data.get("name", "Unknown") if user_data else "Unknown"
         save_search_history_to_firestore(user_id, user_display_name, base_ca, len(bulk_results), bulk_results)
     except Exception as db_err:
         print(f"Firestore save error: {db_err}")
 
+    # Export to Excel
     df = pd.DataFrame(bulk_results)
-    file_name = f"Bulk_Bill_{user_id}.xlsx"
+    file_name = f"Bulk_Bill_{user_id}_{int(time.time())}.xlsx"
     df.to_excel(file_name, index=False)
-    
+
     final_data = get_user_data(user_id)
     final_bal = final_data.get("balance", 0.0) if final_data else 0.0
-    
     ist_datetime = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    
+
     caption_text = f"""✅ **Bulk Search Completed!**
 
 📊 **Invoice / Report Summary:**
 🕒 **Date time:** `{ist_datetime}`
 💬 **Chat id:** `{user_id}`
-🔢 **Ca number:** `{base_ca}`
+🔢 **Base CA number:** `{base_ca}`
 
-📈 Total Processed: `{len(bulk_results)}` items
-📉 Wallet Deducted: `₹{deducted_total}` (₹12/each)
-💰 Remaining Balance: `₹{final_bal}`"""
+✅ **Valid Records:** `{len(bulk_results)}`
+❌ **Invalid Records Skipped:** `{invalid_count}`
+📉 **Wallet Deducted:** `₹{deducted_total}` (₹12/valid)
+💰 **Remaining Balance:** `₹{final_bal}`"""
 
     with open(file_name, "rb") as file:
         bot.send_document(
-            message.chat.id, 
-            file, 
+            message.chat.id,
+            file,
             caption=caption_text,
             parse_mode="Markdown",
             reply_markup=dashboard_markup
         )
-        
+
     if os.path.exists(file_name):
         os.remove(file_name)
 
+# ================= BOT RUNNER =================
 if __name__ == "__main__":
-    print("🤖 BABA MNGL Multi-threaded Bot running and monitoring background resends...")
+    print("🤖 BABA MNGL Multi-threaded Bot running with Valid Record Logic...")
     bot.infinity_polling()
