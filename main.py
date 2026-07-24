@@ -9,7 +9,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ================= CONFIGURATIONS =================
-BOT_TOKEN = "8888346751:AAHBjv-VX3JIcBo68brML3opH1gw7hq6W-g"
+BOT_TOKEN = "8605679083:AAHz_HOJjReDkKQNbBeadqvATpA9iDiJtLo"
 ADMIN_ID = 8184803370
 FIREBASE_PROJECT_ID = "ss22-a96d3"
 
